@@ -1,0 +1,46 @@
+# sbt
+target/
+project/target/
+project/project/
+project/metals.sbt
+src_managed/
+lib_managed/
+.history
+
+# Mill
+out/
+.mill-version-cache/
+
+# scala-cli
+.scala-build/
+
+# Metals / Bloop / BSP
+.metals/
+.bloop/
+.bsp/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# JVM
+hs_err_pid*.log
+replay_pid*.log
+
+# Chisel / FIRRTL 생성물
+*.fir
+*.anno.json
+test_run_dir/
+generated/
+
+# Verilator / 시뮬레이션
+obj_dir/
+*.vcd
+*.fst
+
+# OS
+.DS_Store
+._*
+.AppleDouble
