@@ -8,6 +8,11 @@ object `chisel-riscv-soc-lab` extends SbtModule {
   def scalaVersion = "2.13.18"
   def chiselVersion = "7.15.0"
 
+  // Root-level build.mill: a top-level module defaults its source dir to
+  // <repo>/<module-name>/. os.up moves it back to the repo root so sbt and
+  // Mill read the same src/main/scala and src/test/scala.
+  def moduleDir = super.moduleDir / os.up
+
   override def scalacOptions = Seq(
     "-language:reflectiveCalls",
     "-deprecation",
