@@ -44,3 +44,6 @@ obj_dir/
 .DS_Store
 ._*
 .AppleDouble
+
+# ChiselSim test work dir
+build/
