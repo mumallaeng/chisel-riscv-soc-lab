@@ -26,6 +26,11 @@ object ALUOp extends ChiselEnum {
   val and = Value(2.U)
   val or  = Value(3.U)
   val xor = Value(4.U)
+
+  // shift
+  val sll = Value(5.U)
+  val srl = Value(6.U)
+  val sra = Value(7.U)
 }
 
 class ALU extends RawModule {
@@ -34,14 +39,7 @@ class ALU extends RawModule {
   val op  = IO(Input(ALUOp()))
   val out = IO(Output(UInt(32.W)))
 
-  // out := 0.U // default
-  // switch(op) {
-  //   is(ALUOp.add)(out := a + b)
-  //   is(ALUOp.sub)(out := a - b)
-  //   is(ALUOp.and)(out := a & b)
-  //   is(ALUOp.or)(out := a | b)
-  //   is(ALUOp.xor)(out := a ^ b)
-  // }
+  val shamt = b(4, 0) // shift amount: 하위 5비트
 
   out := MuxLookup(op, 0.U)(Seq(
     ALUOp.add -> (a + b),
@@ -49,5 +47,10 @@ class ALU extends RawModule {
     ALUOp.and -> (a & b),
     ALUOp.or  -> (a | b),
     ALUOp.xor -> (a ^ b),
+
+    // shift
+    ALUOp.sll -> (a << shamt)(31, 0),
+    ALUOp.srl -> (a >> shamt),
+    ALUOp.sra -> (a.asSInt >> shamt).asUInt,
   ))
 }
