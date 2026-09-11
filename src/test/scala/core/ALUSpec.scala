@@ -32,5 +32,17 @@ class ALUSpec extends AnyFunSpec with ChiselSim {
         dut.op.poke(ALUOp.sra); dut.out.expect("hF8000000".U) // 왼쪽 부호 비트 채움
       }
     }
+    it("slt / sltu") {
+      simulateRaw(new ALU) { dut =>
+        dut.a.poke("hFFFFFFFF".U); dut.b.poke(1.U)   // signed -1 vs 1
+        dut.op.poke(ALUOp.slt); dut.out.expect(1.U)  // -1 < 1
+        dut.op.poke(ALUOp.sltu); dut.out.expect(0.U) // 0xFFFFFFFF > 1
+        dut.a.poke(1.U); dut.b.poke(2.U)
+        dut.op.poke(ALUOp.slt); dut.out.expect(1.U)
+        dut.op.poke(ALUOp.sltu); dut.out.expect(1.U)
+        dut.a.poke(5.U); dut.b.poke(5.U)
+        dut.op.poke(ALUOp.slt); dut.out.expect(0.U) // 같으면 0
+      }
+    }
   }
 }

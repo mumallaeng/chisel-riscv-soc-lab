@@ -31,6 +31,10 @@ object ALUOp extends ChiselEnum {
   val sll = Value(5.U)
   val srl = Value(6.U)
   val sra = Value(7.U)
+
+  // compare
+  val slt  = Value(8.U)
+  val sltu = Value(9.U)
 }
 
 class ALU extends RawModule {
@@ -52,5 +56,9 @@ class ALU extends RawModule {
     ALUOp.sll -> (a << shamt)(31, 0),
     ALUOp.srl -> (a >> shamt),
     ALUOp.sra -> (a.asSInt >> shamt).asUInt,
+
+    // compare
+    ALUOp.slt  -> Mux(a.asSInt < b.asSInt, 1.U, 0.U),
+    ALUOp.sltu -> Mux(a < b, 1.U, 0.U),
   ))
 }
