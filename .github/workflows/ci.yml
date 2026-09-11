@@ -34,7 +34,4 @@ jobs:
         with:
           java-version: "17"
           distribution: "temurin"
-      - uses: coursier/setup-action@v1
-        with:
-          apps: mill
-      - run: mill chisel-riscv-soc-lab.test
+      - run: ./mill chisel-riscv-soc-lab.test
