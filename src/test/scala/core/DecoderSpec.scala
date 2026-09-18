@@ -78,23 +78,26 @@ class DecoderSpec extends AnyFunSpec with ChiselSim {
         dut.ctrl.immSel.expect(ImmType.btype)
       }
     }
-    it("lui/auipc: regWrite=1, aluSrc=1, immSel=utype, funct3 무관") {
+    it("lui/auipc: regWrite=1, aluSrc=1, immSel=utype, funct3 무관 — aluSrcA만 다르다(0 vs pc)") {
       simulateRaw(new Decoder) { dut =>
         dut.inst.poke(encode(0x37, funct3 = 5)) // lui, funct3 아무 값
         dut.ctrl.regWrite.expect(true.B)
         dut.ctrl.aluSrc.expect(true.B)
         dut.ctrl.immSel.expect(ImmType.utype)
+        dut.ctrl.aluSrcA.expect(AluASrc.zero)
         dut.inst.poke(encode(0x17, funct3 = 2)) // auipc
         dut.ctrl.regWrite.expect(true.B)
         dut.ctrl.immSel.expect(ImmType.utype)
+        dut.ctrl.aluSrcA.expect(AluASrc.pc)
       }
     }
-    it("jal: jump=1, regWrite=1, immSel=jtype") {
+    it("jal: jump=1, regWrite=1, immSel=jtype, aluSrc=0(jalr과 구분용)") {
       simulateRaw(new Decoder) { dut =>
         dut.inst.poke(encode(0x6f))
         dut.ctrl.jump.expect(true.B)
         dut.ctrl.regWrite.expect(true.B)
         dut.ctrl.immSel.expect(ImmType.jtype)
+        dut.ctrl.aluSrc.expect(false.B)
       }
     }
     it("jalr: jump=1, aluSrc=1, immSel=itype") {

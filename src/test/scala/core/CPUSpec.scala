@@ -15,6 +15,10 @@ class CPUSpec extends AnyFunSpec with ChiselSim {
   case class I(op: String, rd: Int, rs1: Int, imm: Int) extends Instr
   case class L(op: String, rd: Int, rs1: Int, imm: Int) extends Instr // load: lb/lh/lw/lbu/lhu
   case class S(op: String, rs1: Int, rs2: Int, imm: Int) extends Instr // store: sb/sh/sw, rs2를 (rs1+imm)에 저장
+  case class B(op: String, rs1: Int, rs2: Int, imm: Int) extends Instr // branch, imm = 이 명령어 자신의 pc 기준 byte offset(짝수)
+  case class U(op: String, rd: Int, imm20: Int) extends Instr         // lui/auipc, imm20 = inst[31:12] (실제 값은 imm20<<12)
+  case class Jal(rd: Int, imm: Int) extends Instr                     // pc 기준 byte offset(짝수)
+  case class Jalr(rd: Int, rs1: Int, imm: Int) extends Instr          // target = (rs1+imm) & ~1
 
   def rFields(op: String): (Int, Int) = op match { // (funct7, funct3)
     case "add"  => (0x00, 0)
@@ -46,6 +50,9 @@ class CPUSpec extends AnyFunSpec with ChiselSim {
   def sFunct3(op: String): Int = op match {
     case "sb" => 0; case "sh" => 1; case "sw" => 2
   }
+  def bFunct3(op: String): Int = op match {
+    case "beq" => 0; case "bne" => 1; case "blt" => 4; case "bge" => 5; case "bltu" => 6; case "bgeu" => 7
+  }
 
   def encode(instr: Instr): BigInt = instr match {
     case R(op, rd, rs1, rs2) =>
@@ -74,13 +81,37 @@ class CPUSpec extends AnyFunSpec with ChiselSim {
       val immLo   = v & 0x1f
       (BigInt(immHi) << 25) | (BigInt(rs2) << 20) | (BigInt(rs1) << 15) |
         (BigInt(f3) << 12) | (BigInt(immLo) << 7) | BigInt(0x23)
+    case B(op, rs1, rs2, imm) =>
+      val f3 = bFunct3(op)
+      val v  = imm & 0x1ffe // bit0은 항상 0
+      (BigInt((v >> 12) & 0x1) << 31) | (BigInt((v >> 5) & 0x3f) << 25) | (BigInt(rs2) << 20) |
+        (BigInt(rs1) << 15) | (BigInt(f3) << 12) | (BigInt((v >> 1) & 0xf) << 8) |
+        (BigInt((v >> 11) & 0x1) << 7) | BigInt(0x63)
+    case U(op, rd, imm20) =>
+      val opc = if (op == "lui") 0x37 else 0x17 // auipc
+      (BigInt(imm20 & 0xfffff) << 12) | (BigInt(rd) << 7) | BigInt(opc)
+    case Jal(rd, imm) =>
+      val v = imm & 0x1ffffe // bit0은 항상 0
+      (BigInt((v >> 20) & 0x1) << 31) | (BigInt((v >> 12) & 0xff) << 12) |
+        (BigInt((v >> 11) & 0x1) << 20) | (BigInt((v >> 1) & 0x3ff) << 21) |
+        (BigInt(rd) << 7) | BigInt(0x6f)
+    case Jalr(rd, rs1, imm) =>
+      val imm12 = imm & 0xfff
+      (BigInt(imm12) << 20) | (BigInt(rs1) << 15) | (BigInt(rd) << 7) | BigInt(0x67) // funct3=000
   }
 
-  def interpret(prog: Seq[Instr]): Array[Int] = {
-    val regs = Array.fill(32)(0)
-    val mem  = Array.fill(1024)(0.toByte) // DataMemory 기본 크기(256 word)와 맞춘 byte 배열
+  // cycles만큼, pc를 따라가며 한 사이클에 한 명령을 실행한다(분기/점프로 순서가 바뀔 수 있어
+  // 이제 prog를 순서대로 foreach 못 돌고, 하드웨어처럼 주소로 다음 명령을 찾아야 한다).
+  def interpret(prog: Seq[Instr], cycles: Int): Array[Int] = {
+    val regs   = Array.fill(32)(0)
+    val mem    = Array.fill(1024)(0.toByte) // DataMemory 기본 크기(256 word)와 맞춘 byte 배열
+    val byAddr = prog.zipWithIndex.map { case (instr, i) => (i * 4, instr) }.toMap
     def w(rd: Int, v: Int): Unit = if (rd != 0) regs(rd) = v
-    prog.foreach {
+
+    var pc = 0
+    for (_ <- 0 until cycles) {
+      var nextPc = pc + 4
+      byAddr(pc) match {
       case R("add", rd, rs1, rs2)  => w(rd, regs(rs1) + regs(rs2))
       case R("sub", rd, rs1, rs2)  => w(rd, regs(rs1) - regs(rs2))
       case R("sll", rd, rs1, rs2)  => w(rd, regs(rs1) << (regs(rs2) & 0x1f))
@@ -121,16 +152,31 @@ class CPUSpec extends AnyFunSpec with ChiselSim {
       case S("sw", rs1, rs2, imm) =>
         val a = regs(rs1) + imm
         for (i <- 0 to 3) mem(a + i) = (regs(rs2) >>> (8 * i)).toByte
+      case B("beq", rs1, rs2, imm)  => if (regs(rs1) == regs(rs2)) nextPc = pc + imm
+      case B("bne", rs1, rs2, imm)  => if (regs(rs1) != regs(rs2)) nextPc = pc + imm
+      case B("blt", rs1, rs2, imm)  => if (regs(rs1) < regs(rs2)) nextPc = pc + imm
+      case B("bge", rs1, rs2, imm)  => if (regs(rs1) >= regs(rs2)) nextPc = pc + imm
+      case B("bltu", rs1, rs2, imm) => if (java.lang.Integer.compareUnsigned(regs(rs1), regs(rs2)) < 0) nextPc = pc + imm
+      case B("bgeu", rs1, rs2, imm) => if (java.lang.Integer.compareUnsigned(regs(rs1), regs(rs2)) >= 0) nextPc = pc + imm
+      case U("lui", rd, imm20)   => w(rd, imm20 << 12)
+      case U("auipc", rd, imm20) => w(rd, pc + (imm20 << 12))
+      case Jal(rd, imm) =>
+        w(rd, pc + 4); nextPc = pc + imm
+      case Jalr(rd, rs1, imm) =>
+        w(rd, pc + 4); nextPc = (regs(rs1) + imm) & ~1
       case other => sys.error(s"golden model: unsupported instr $other")
+      }
+      pc = nextPc
     }
     regs
   }
 
-  def run(prog: Seq[Instr]): Unit = {
-    val words = prog.map(i => encode(i).U(32.W))
-    val expected = interpret(prog)
+  def run(prog: Seq[Instr], cycles: Int = -1): Unit = {
+    val n        = if (cycles < 0) prog.length else cycles
+    val words    = prog.map(i => encode(i).U(32.W))
+    val expected = interpret(prog, n)
     simulate(new CPU(words)) { dut =>
-      dut.clock.step(prog.length)
+      dut.clock.step(n)
       for (r <- 0 until 32) {
         dut.io.debugRegs(r).expect(expected(r).S(32.W).asUInt)
       }
@@ -215,6 +261,76 @@ class CPUSpec extends AnyFunSpec with ChiselSim {
         I("addi", rd = 3, rs1 = 0, imm = 0),
         S("sb", rs1 = 1, rs2 = 3, imm = 1),   // byte lane 1만 0x00
         L("lw", rd = 4, rs1 = 1, imm = 0),    // 0xFFFF00FF 기대
+      ))
+    }
+  }
+
+  describe("CPU (branch/jump)") {
+    it("beq taken이면 다음 명령을 건너뛴다") {
+      run(
+        Seq(
+          I("addi", rd = 1, rs1 = 0, imm = 5),
+          I("addi", rd = 2, rs1 = 0, imm = 5),
+          B("beq", rs1 = 1, rs2 = 2, imm = 8),   // pc=8, 같으니 taken -> pc=16으로
+          I("addi", rd = 3, rs1 = 0, imm = 999), // pc=12, 건너뛰어짐
+          I("addi", rd = 4, rs1 = 0, imm = 42),  // pc=16, 여기부터 재개
+        ),
+        cycles = 4, // pc=0,4,8,16 (12는 안 밟음)
+      )
+    }
+    it("bne not-taken이면 그냥 다음 명령으로 진행한다") {
+      run(Seq(
+        I("addi", rd = 1, rs1 = 0, imm = 5),
+        I("addi", rd = 2, rs1 = 0, imm = 5),
+        B("bne", rs1 = 1, rs2 = 2, imm = 8), // 같으니 bne는 not-taken
+        I("addi", rd = 3, rs1 = 0, imm = 77),
+        I("addi", rd = 4, rs1 = 0, imm = 88),
+      )) // cycles 생략 -> prog.length(5), 분기 없이 순서대로
+    }
+    it("blt(signed)와 bltu(unsigned)가 같은 비트패턴을 다르게 판정한다") {
+      run(
+        Seq(
+          I("addi", rd = 1, rs1 = 0, imm = -1), // x1 = 0xFFFFFFFF
+          I("addi", rd = 2, rs1 = 0, imm = 0),  // x2 = 0
+          B("blt", rs1 = 1, rs2 = 2, imm = 8),  // signed: -1 < 0 -> taken
+          I("addi", rd = 3, rs1 = 0, imm = 111),
+          I("addi", rd = 4, rs1 = 0, imm = 222),
+        ),
+        cycles = 4,
+      )
+      run(Seq(
+        I("addi", rd = 1, rs1 = 0, imm = -1),
+        I("addi", rd = 2, rs1 = 0, imm = 0),
+        B("bltu", rs1 = 1, rs2 = 2, imm = 8), // unsigned: 0xFFFFFFFF < 0 -> not taken
+        I("addi", rd = 3, rs1 = 0, imm = 111),
+        I("addi", rd = 4, rs1 = 0, imm = 222),
+      )) // not taken -> 5 사이클 다 실행
+    }
+    it("jal: rd에 복귀주소(pc+4)를 쓰고 pc-relative로 건너뛴다") {
+      run(
+        Seq(
+          Jal(rd = 1, imm = 8),                  // pc=0 -> pc=8, x1 = 0+4 = 4
+          I("addi", rd = 2, rs1 = 0, imm = 999), // pc=4, 건너뛰어짐
+          I("addi", rd = 3, rs1 = 0, imm = 55),  // pc=8
+        ),
+        cycles = 2,
+      )
+    }
+    it("jalr: rs1+imm의 LSB를 0으로 자른 주소로 뛴다") {
+      run(
+        Seq(
+          I("addi", rd = 1, rs1 = 0, imm = 13),   // x1 = 13 (홀수, 일부러)
+          Jalr(rd = 2, rs1 = 1, imm = 0),         // target = 13 & ~1 = 12, x2 = pc+4 = 8
+          I("addi", rd = 3, rs1 = 0, imm = 999),  // pc=8, 건너뛰어짐
+          I("addi", rd = 4, rs1 = 0, imm = 77),   // pc=12
+        ),
+        cycles = 3,
+      )
+    }
+    it("lui/auipc: 상위 20비트 배치 + auipc는 자기 pc를 더한다") {
+      run(Seq(
+        U("lui", rd = 1, imm20 = 0x12345),
+        U("auipc", rd = 2, imm20 = 1), // pc=4 -> x2 = 4 + (1<<12) = 4100
       ))
     }
   }
