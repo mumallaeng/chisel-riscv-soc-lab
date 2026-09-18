@@ -11,12 +11,14 @@ class RegisterFile extends Module {
     val writeEnable = Input(Bool())
     val readData1   = Output(UInt(32.W))
     val readData2   = Output(UInt(32.W))
+    val debugRegs   = Output(Vec(32, UInt(32.W))) // 검증용 전체 덤프, datapath 배선엔 안 씀
   })
 
   val regs = RegInit(VecInit(Seq.fill(32)(0.U(32.W))))
 
-  io.readData1 := regs(io.rs1)
-  io.readData2 := regs(io.rs2)
+  io.readData1  := regs(io.rs1)
+  io.readData2  := regs(io.rs2)
+  io.debugRegs  := regs
 
   when(io.writeEnable && io.rd =/= 0.U) {
     regs(io.rd) := io.writeData
