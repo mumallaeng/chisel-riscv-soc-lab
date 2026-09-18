@@ -3,14 +3,13 @@ package core
 import chisel3._
 import chisel3.util._
 
-// ALU의 A 입력원. R/I/Load/Store/Branch는 rs1, LUI는 0(imm을 그대로 통과), AUIPC는 PC.
 object AluASrc extends ChiselEnum {
   val rs1, zero, pc = Value
 }
 
 class ControlSignals extends Bundle {
   val aluOp    = ALUOp()
-  val aluSrc   = Bool() // ALU B 입력: 0 = rs2, 1 = immediate. JAL/JALR 구분에도 재사용(JALR만 Y)
+  val aluSrc   = Bool() // 0 = rs2, 1 = immediate
   val aluSrcA  = AluASrc()
   val immSel   = ImmType()
   val regWrite = Bool()
@@ -100,11 +99,11 @@ class Decoder extends RawModule {
     pat("???????", "110", "1100011") -> row(ALUOp.sltu, N, ImmType.btype, N, N, N, N, Y, N), // bltu
     pat("???????", "111", "1100011") -> row(ALUOp.sltu, N, ImmType.btype, N, N, N, N, Y, N), // bgeu
 
-    // LUI / AUIPC (funct3 무관, opcode만으로 결정). aluSrcA만 다르고 나머진 동일 --
-    pat("???????", "???", "0110111") -> row(ALUOp.add, Y, ImmType.utype, Y, N, N, N, N, N, AluASrc.zero), // lui: 0 + imm
-    pat("???????", "???", "0010111") -> row(ALUOp.add, Y, ImmType.utype, Y, N, N, N, N, N, AluASrc.pc),   // auipc: pc + imm
+    // LUI / AUIPC (funct3 무관, opcode만으로 결정) -----------------------------
+    pat("???????", "???", "0110111") -> row(ALUOp.add, Y, ImmType.utype, Y, N, N, N, N, N, AluASrc.zero), // lui
+    pat("???????", "???", "0010111") -> row(ALUOp.add, Y, ImmType.utype, Y, N, N, N, N, N, AluASrc.pc),   // auipc
 
-    // JAL / JALR. aluSrc로 둘을 구분(jal=N, jalr=Y) — datapath의 next-PC mux가 이걸로 target을 고른다.
+    // JAL / JALR ----------------------------------------------------------------
     pat("???????", "???", "1101111") -> row(ALUOp.add, N, ImmType.jtype, Y, N, N, N, N, Y), // jal
     pat("???????", "000", "1100111") -> row(ALUOp.add, Y, ImmType.itype, Y, N, N, N, N, Y), // jalr
   )

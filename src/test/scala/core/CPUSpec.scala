@@ -66,10 +66,8 @@ class CPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness {
     it("sh/lh는 word 안 상위 하프에도 정확히 배치된다 (offset != 0)") {
       run(Seq(
         I("addi", rd = 1, rs1 = 0, imm = 16),
-        I("addi", rd = 2, rs1 = 0, imm = 2000), // I-type immediate는 signed 12비트(-2048~2047) 안이어야 sign-extend가 안 걸린다
-        // Mem은 RegInit처럼 0으로 초기화되지 않는다(uninitialized) -- 건드리지 않은 자리를
-        // 0으로 가정하면 안 되므로, 검사 전에 word 전체를 SW로 명시적으로 0을 찍어둔다.
-        S("sw", rs1 = 1, rs2 = 0, imm = 0),
+        I("addi", rd = 2, rs1 = 0, imm = 2000),
+        S("sw", rs1 = 1, rs2 = 0, imm = 0), // Mem is uninitialized; zero the word first
         S("sh", rs1 = 1, rs2 = 2, imm = 2),  // addr 18 = word 16의 상위 하프
         L("lh", rd = 3, rs1 = 1, imm = 2),
         L("lw", rd = 4, rs1 = 1, imm = 0),   // 하위 하프는 (SW로 찍어둔) 0이어야 함

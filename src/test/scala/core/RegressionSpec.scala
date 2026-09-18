@@ -4,10 +4,6 @@ import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.funspec.AnyFunSpec
 import RV32IReference._
 
-// Step 10 — 회귀 통합. CPUSpec이 기능별로 쪼개서 확인한 것과 달리, 여기는 riscv-tests
-// 스타일의 "self-checking" 프로그램(기대값을 프로그램 자기 안에서 비교해서, 맞으면
-// x31=1을 쓰고 틀리면 fail 라벨에서 무한루프)과, 여러 기능을 실제로 엮어 쓰는
-// 통합 프로그램(반복문)으로 v0.2.0 RV32I single-cycle 전체를 마무리 검증한다.
 class RegressionSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness {
   describe("self-checking directed tests (riscv-tests 관례: x31=1이면 pass, 아니면 fail 라벨에서 무한루프)") {
     it("ALU: add 결과가 기대값과 같은지 프로그램 스스로 확인한다") {
