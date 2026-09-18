@@ -3,9 +3,9 @@ package core
 import chisel3._
 import chisel3.util._
 
-// RV32I 싱글사이클 datapath — 이번 스텝은 R-type/I-type ALU 명령만 대상.
-// load/store/branch/jump용 control 신호(memRead/memWrite/memToReg/branch/jump)는
-// Decoder가 이미 내지만 여기선 아직 안 물린다(Step 8~9에서 배선).
+// RV32I 싱글사이클 datapath — R/I-type ALU + load/store까지 대상.
+// branch/jump용 control 신호(branch/jump)는 Decoder가 이미 내지만
+// 여기선 아직 안 물린다(Step 9에서 배선).
 class CPU(program: Seq[UInt]) extends Module {
   val io = IO(new Bundle {
     val pc        = Output(UInt(32.W))
@@ -41,7 +41,13 @@ class CPU(program: Seq[UInt]) extends Module {
   alu.b  := Mux(decoder.ctrl.aluSrc, immGen.imm, regFile.io.readData2)
   alu.op := decoder.ctrl.aluOp
 
-  regFile.io.writeData   := alu.out
+  val dmem = Module(new DataMemory)
+  dmem.io.addr      := alu.out              // load/store 주소 = rs1 + imm (ALU가 계산)
+  dmem.io.writeData := regFile.io.readData2 // 저장할 값은 aluSrc 무관하게 rs2 원본
+  dmem.io.memWrite  := decoder.ctrl.memWrite
+  dmem.io.funct3    := inst(14, 12)         // byte/half/word 폭 선택은 decoder를 안 거치고 직접
+
+  regFile.io.writeData   := Mux(decoder.ctrl.memToReg, dmem.io.readData, alu.out)
   regFile.io.writeEnable := decoder.ctrl.regWrite
 
   io.debugRegs := regFile.io.debugRegs
