@@ -1,4 +1,8 @@
 //| mill-version: 1.1.8
+//| mill-opts: ["-j", "4"]
+// Cap parallel test forks. Every ChiselSim test runs `verilator --build -j 0`, so the default
+// (one fork per core) oversubscribes the CPU; under extreme load Apple's GNU Make 3.81 was seen to
+// build an empty Verilator __ALL.a and fail to link. -j 4 was also the fastest on a 10-core Mac.
 package build
 
 import mill._
