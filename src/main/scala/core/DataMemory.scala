@@ -3,9 +3,6 @@ package core
 import chisel3._
 import chisel3.util._
 
-// funct3 인코딩(RV32I 표준, load/store 공용): LB/SB=000 LH/SH=001 LW/SW=010 LBU=100 LHU=101
-// memRead=0이면 readData는 0 — 메모리는 읽기 사이클 밖에서 출력을 붙잡아 주지 않는다(교과서의 MemRead 모델).
-// 그래서 multi-cycle에서 load 데이터는 Memory 상태가 끝날 때 MDR로 잡아 둬야 한다.
 class DataMemory(depthWords: Int = 256) extends Module {
   val io = IO(new Bundle {
     val addr      = Input(UInt(32.W))
@@ -22,7 +19,6 @@ class DataMemory(depthWords: Int = 256) extends Module {
   val byteOff   = io.addr(1, 0)
   val shiftBits = byteOff << 3 // byteOff * 8
 
-  // ---- 읽기: word를 읽고, 대상 바이트/하프워드가 LSB에 오도록 오른쪽으로 밀어 잘라낸다 ----
   val word    = mem.read(wordAddr)
   val wordU   = Cat(word(3), word(2), word(1), word(0)) // 리틀엔디안: lane 0 = LSB
   val aligned = wordU >> shiftBits
@@ -39,7 +35,6 @@ class DataMemory(depthWords: Int = 256) extends Module {
   ))
   io.readData := Mux(io.memRead, loaded, 0.U)
 
-  // ---- 쓰기: 반대로 source data를 왼쪽으로 밀어 대상 lane에 맞춘 뒤, mask로 그 lane만 쓴다 ----
   val shiftedWrite = (io.writeData << shiftBits)(31, 0)
   val storeBytes   = VecInit(Seq.tabulate(4)(i => shiftedWrite(8 * i + 7, 8 * i)))
 
