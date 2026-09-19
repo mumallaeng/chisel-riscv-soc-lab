@@ -197,4 +197,19 @@ trait RV32ITestHarness { self: ChiselSim =>
       }
     }
   }
+
+  // multi-cycle CPU용. golden model은 "명령어 instrs개를 실행한 뒤"의 레지스터를, 하드웨어는
+  // hwCycles 사이클 뒤의 레지스터를 본다 — 명령어당 사이클 수(CPI)가 명령어마다 달라서 둘은 다른 값이고,
+  // 호출하는 쪽이 hwCycles를 직접 세어 넘긴다(instrs를 생략하면 prog.length).
+  def runMultiCycle(prog: Seq[Instr], hwCycles: Int, instrs: Int = -1): Unit = {
+    val n        = if (instrs < 0) prog.length else instrs
+    val words    = prog.map(i => encode(i).U(32.W))
+    val expected = interpret(prog, n)
+    simulate(new MultiCycleCPU(words)) { dut =>
+      dut.clock.step(hwCycles)
+      for (r <- 0 until 32) {
+        dut.io.debugRegs(r).expect(expected(r).S(32.W).asUInt)
+      }
+    }
+  }
 }
