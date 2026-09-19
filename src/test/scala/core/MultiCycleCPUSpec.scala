@@ -196,7 +196,7 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         }
       }
     }
-    it("load는 5사이클: MDR은 Memory 상태 뒤에 채워지고, 레지스터는 Writeback 뒤에 바뀐다") {
+    it("load는 5사이클: 메모리 출력은 Memory 상태에서만 유효하고, MDR이 붙잡아 Writeback에 넘긴다") {
       val prog: Seq[Instr] = Seq(
         S("sw", rs1 = 1, rs2 = 2, imm = 4), // 4사이클, t=0..3
         L("lw", rd = 5, rs1 = 1, imm = 4),  // t=4..8 (Fetch=4, Decode=5, Execute=6, Memory=7, Writeback=8)
@@ -206,10 +206,12 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         dut.clock.step(7)
         dut.io.state.expect(State.memory)
         dut.io.aluOut.expect(20.U) // 주소
-        dut.io.mdr.expect(0.U)     // 아직 안 읽음
+        dut.io.memOut.expect("hDEADBEEF".U) // memRead가 켜진 Memory 상태: 메모리 출력이 유효
+        dut.io.mdr.expect(0.U)     // MDR은 아직 못 잡음 (이 사이클 끝에 잡는다)
         dut.clock.step(1)
         dut.io.state.expect(State.writeback)
-        dut.io.mdr.expect("hDEADBEEF".U) // Memory 상태가 끝나며 MDR에 담김
+        dut.io.memOut.expect(0.U)        // Writeback: memRead가 꺼져 메모리 출력은 0 — 메모리는 값을 안 붙잡는다
+        dut.io.mdr.expect("hDEADBEEF".U) // 그래서 MDR만이 값을 들고 있다
         dut.io.debugRegs(5).expect(0.U)  // 레지스터는 아직 (x5 초기값 0)
         dut.clock.step(1)
         dut.io.state.expect(State.fetch)

@@ -48,6 +48,7 @@ class CPU(program: Seq[UInt]) extends Module {
   dmem.io.addr      := alu.out              // load/store 주소 = rs1 + imm (ALU가 계산)
   dmem.io.writeData := regFile.io.readData2 // 저장할 값은 aluSrc 무관하게 rs2 원본
   dmem.io.memWrite  := decoder.ctrl.memWrite
+  dmem.io.memRead   := decoder.ctrl.memRead
   dmem.io.funct3    := funct3               // byte/half/word 폭 선택은 decoder를 안 거치고 직접
 
   // 분기 판정: aluOp가 sub면 "0인가"(beq 조건), slt/sltu면 "1인가"(blt/bltu 조건)를 본다.

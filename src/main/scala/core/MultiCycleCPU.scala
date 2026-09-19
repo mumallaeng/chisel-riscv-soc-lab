@@ -22,6 +22,7 @@ class MultiCycleCPU(program: Seq[UInt], regInit: Map[Int, BigInt] = Map.empty) e
     val b         = Output(UInt(32.W))
     val aluOut    = Output(UInt(32.W))
     val mdr       = Output(UInt(32.W))
+    val memOut    = Output(UInt(32.W)) // 검증용: data memory 출력 자체(memRead가 켜진 사이클에만 유효)
     val debugRegs = Output(Vec(32, UInt(32.W)))
   })
 
@@ -65,13 +66,16 @@ class MultiCycleCPU(program: Seq[UInt], regInit: Map[Int, BigInt] = Map.empty) e
   alu.b  := Mux(inExecute, Mux(decoder.ctrl.aluSrc, immGen.imm, b), 4.U)
   alu.op := Mux(inExecute, decoder.ctrl.aluOp, ALUOp.add)
 
-  // data memory는 Memory 상태에서만 쓴다. IR이 여러 사이클 유지되므로 decoder의 memWrite는
-  // Decode/Execute/Writeback에서도 1인데, 그때 쓰면 옛 aluOut 주소를 옛 B 값으로 덮어쓴다.
+  // data memory는 Memory 상태에서만 쓰고 읽는다. IR이 여러 사이클 유지되므로 decoder의
+  // memWrite/memRead는 Decode/Execute/Writeback에서도 1인데, 그때 쓰면 옛 aluOut 주소를 옛 B 값으로
+  // 덮어쓴다. 읽기도 같은 상태로 게이트하면 메모리 출력은 Memory 상태에서만 유효하고 Writeback에선
+  // 0이므로, load 데이터는 MDR이 붙잡고 있어야만 한다.
   val dmem = Module(new DataMemory)
   dmem.io.addr      := aluOut
   dmem.io.writeData := b
   dmem.io.funct3    := ir(14, 12) // byte/half/word 폭 선택은 single-cycle과 같이 IR에서 직접
   dmem.io.memWrite  := state === State.memory && decoder.ctrl.memWrite
+  dmem.io.memRead   := state === State.memory && decoder.ctrl.memRead
 
   // R/I-type ALU 명령어 = rd에 쓰면서 load/jump/lui/auipc가 아닌 것. opcode를 직접 비교하지
   // 않고 Decoder가 이미 내는 제어 신호로 가른다.
@@ -95,7 +99,7 @@ class MultiCycleCPU(program: Seq[UInt], regInit: Map[Int, BigInt] = Map.empty) e
       state  := Mux(isMemInst, State.memory, State.writeback)
     }
     is(State.memory) {
-      when(decoder.ctrl.memRead) { mdr := dmem.io.readData }
+      mdr := dmem.io.readData // memRead가 아니면(store) 0이 담기지만 아무도 안 읽는다
       state := Mux(decoder.ctrl.memRead, State.writeback, State.fetch) // store는 여기서 끝
     }
     is(State.writeback) {
@@ -110,5 +114,6 @@ class MultiCycleCPU(program: Seq[UInt], regInit: Map[Int, BigInt] = Map.empty) e
   io.b         := b
   io.aluOut    := aluOut
   io.mdr       := mdr
+  io.memOut    := dmem.io.readData
   io.debugRegs := regFile.io.debugRegs
 }
