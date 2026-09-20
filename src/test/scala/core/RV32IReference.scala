@@ -3,11 +3,6 @@ package core
 import chisel3._
 import chisel3.simulator.scalatest.ChiselSim
 
-// RV32I 골든 모델 — Step 7~9까지 CPUSpec 안에 있던 것을 별도 파일로 정리했다(Step 10).
-// encode(하드웨어에 넣을 32비트 워드)와 interpret(기대 레지스터 값)를 명령어 ADT에서
-// 각각 독립적으로 유도한다. interpret은 ALU.scala/Decoder.scala/CPU.scala를 절대
-// 참조하지 않고 RV32I 스펙 그대로(Scala 네이티브 Int 연산)로 계산한다 — 같은 코드
-// 실수를 encode/interpret 양쪽에 동시에 저지르면 못 걸러내므로 오라클을 분리해 둔다.
 object RV32IReference {
   sealed trait Instr
   case class R(op: String, rd: Int, rs1: Int, rs2: Int) extends Instr
@@ -18,9 +13,7 @@ object RV32IReference {
   case class U(op: String, rd: Int, imm20: Int) extends Instr         // lui/auipc, imm20 = inst[31:12] (실제 값은 imm20<<12)
   case class Jal(rd: Int, imm: Int) extends Instr                     // pc 기준 byte offset(짝수)
   case class Jalr(rd: Int, rs1: Int, imm: Int) extends Instr          // target = (rs1+imm) & ~1
-  // Raw 32-bit word with an undefined opcode. Treated as a NOP, same policy as the Decoder default
-  // (a real CPU would raise an illegal-instruction trap; this project has no traps yet).
-  case class Raw(word: BigInt) extends Instr
+  case class Raw(word: BigInt) extends Instr // undefined opcode, NOP
 
   def rFields(op: String): (Int, Int) = op match { // (funct7, funct3)
     case "add"  => (0x00, 0)
@@ -103,17 +96,12 @@ object RV32IReference {
     case Raw(word) => word
   }
 
-  // cycles만큼, pc를 따라가며 한 사이클에 한 명령을 실행한다(분기/점프로 순서가 바뀔 수 있어
-  // prog를 순서대로 foreach 못 돌고, 하드웨어처럼 주소로 다음 명령을 찾아야 한다).
   def interpret(prog: Seq[Instr], cycles: Int): Array[Int] = interpretTrace(prog, cycles)._1
 
-  // Like interpret, but also returns the executed instructions in order. With branches/jumps the
-  // executed sequence differs from program order/length, so multi-cycle expected cycles (CPI sum)
-  // are computed from this trace.
   def interpretTrace(prog: Seq[Instr], cycles: Int): (Array[Int], Seq[Instr]) = {
     val regs   = Array.fill(32)(0)
     val executed = scala.collection.mutable.ArrayBuffer[Instr]()
-    val mem    = Array.fill(1024)(0.toByte) // DataMemory 기본 크기(256 word)와 맞춘 byte 배열
+    val mem    = Array.fill(1024)(0.toByte)
     val byAddr = prog.zipWithIndex.map { case (instr, i) => (i * 4, instr) }.toMap
     def w(rd: Int, v: Int): Unit = if (rd != 0) regs(rd) = v
 
@@ -142,11 +130,11 @@ object RV32IReference {
         case I("slli", rd, rs1, imm)  => w(rd, regs(rs1) << (imm & 0x1f))
         case I("srli", rd, rs1, imm)  => w(rd, regs(rs1) >>> (imm & 0x1f))
         case I("srai", rd, rs1, imm)  => w(rd, regs(rs1) >> (imm & 0x1f))
-        case L("lb", rd, rs1, imm)  => w(rd, mem(regs(rs1) + imm).toInt) // Byte->Int: 자동 부호 확장
+        case L("lb", rd, rs1, imm)  => w(rd, mem(regs(rs1) + imm).toInt)
         case L("lbu", rd, rs1, imm) => w(rd, mem(regs(rs1) + imm) & 0xff)
         case L("lh", rd, rs1, imm) =>
           val a = regs(rs1) + imm
-          w(rd, (mem(a + 1).toInt << 8) | (mem(a) & 0xff)) // hi.toInt 부호 확장이 그대로 위로 퍼짐
+          w(rd, (mem(a + 1).toInt << 8) | (mem(a) & 0xff))
         case L("lhu", rd, rs1, imm) =>
           val a = regs(rs1) + imm
           w(rd, ((mem(a + 1) & 0xff) << 8) | (mem(a) & 0xff))
@@ -175,7 +163,7 @@ object RV32IReference {
           w(rd, pc + 4); nextPc = pc + imm
         case Jalr(rd, rs1, imm) =>
           w(rd, pc + 4); nextPc = (regs(rs1) + imm) & ~1
-        case Raw(_) => () // undefined opcode: NOP
+        case Raw(_) => ()
         case other => sys.error(s"golden model: unsupported instr $other")
       }
       pc = nextPc
@@ -184,24 +172,15 @@ object RV32IReference {
   }
 }
 
-// ChiselSim으로 (prog, golden model)을 같이 돌리는 테스트 하네스. CPUSpec과
-// RegressionSpec이 공유한다. ChiselSim은 TestSuite와 섞여야 하는 self-type
-// 제약이 있어서, 여기서 직접 extends 하지 않고 self-type으로만 요구한다 —
-// 실제 mixing은 이 trait를 쓰는 스펙 클래스가 `with ChiselSim`을 같이 붙여서 한다.
 trait RV32ITestHarness { self: ChiselSim =>
   import RV32IReference._
 
-  // expectPass=true면 riscv-tests 식 "self-checking" 관례를 쓴 프로그램이라는 뜻 —
-  // x31을 pass 플래그로 약속하고, golden model 스스로도 x31=1에 도달했는지 먼저
-  // sanity-check한다(프로그램 자체의 오프셋 계산이 틀려 golden model에서마저
-  // fail-loop에 갇히는 실수를 미리 잡기 위함). 최종 검증은 항상 전체 레지스터
-  // 32개를 golden model과 대조하는 쪽이고, 이 어서션은 그 위에 얹는 문서화용 확인이다.
   def run(prog: Seq[Instr], cycles: Int = -1, expectPass: Boolean = false): Unit = {
     val n        = if (cycles < 0) prog.length else cycles
     val words    = prog.map(i => encode(i).U(32.W))
     val expected = interpret(prog, n)
     if (expectPass) {
-      assert(expected(31) == 1, "self-checking 프로그램의 golden model이 pass 마커(x31=1)에 도달하지 못함")
+      assert(expected(31) == 1, "golden model did not reach pass marker (x31=1)")
     }
     simulate(new CPU(words)) { dut =>
       dut.clock.step(n)
@@ -211,12 +190,8 @@ trait RV32ITestHarness { self: ChiselSim =>
     }
   }
 
-  // Instructions the golden model actually executed (following branches/jumps); used to sum CPI.
   def executedInstrs(prog: Seq[Instr], instrs: Int): Seq[Instr] = interpretTrace(prog, instrs)._2
 
-  // For the multi-cycle CPU. The golden model runs `instrs` instructions, the hardware runs `hwCycles`
-  // cycles; CPI differs per instruction so the two counts differ, and the caller supplies hwCycles
-  // (`instrs` defaults to prog.length).
   def runMultiCycle(prog: Seq[Instr], hwCycles: Int, instrs: Int = -1): Unit = {
     val n        = if (instrs < 0) prog.length else instrs
     val words    = prog.map(i => encode(i).U(32.W))
