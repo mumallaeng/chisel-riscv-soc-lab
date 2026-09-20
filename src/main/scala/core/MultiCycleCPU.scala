@@ -115,7 +115,7 @@ class MultiCycleCPU(program: Seq[UInt], regInit: Map[Int, BigInt] = Map.empty) e
     }
     is(State.execute) {
       when(decoder.ctrl.branch) {
-        when(branchTaken) { pc := aluOut } // target latched in Decode; aluOut must not be overwritten here
+        when(branchTaken) { pc := aluOut } // target was latched in Decode; aluOut is left untouched
       }.elsewhen(decoder.ctrl.jump) {
         // Simultaneous assignment on one clock edge (a swap, no temp): pc gets the target,
         // aluOut gets the link address (old pc = oldPC + 4). Writeback then writes aluOut to rd.
