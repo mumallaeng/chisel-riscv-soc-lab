@@ -7,30 +7,42 @@ import RV32IReference._
 
 class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness {
   val regInit = Map(1 -> BigInt(7), 2 -> BigInt(5), 4 -> BigInt(100), 5 -> BigInt(30), 6 -> BigInt(77))
-  // 아직 구현 안 된 명령어(branch/jump 계열)는 Decode에서 곧장 Fetch로 돌아온다 — 마지막 fetch가
-  // imem 범위 밖을 안 읽게 하는 패딩으로도 쓴다.
-  val pad: Instr = B("beq", rs1 = 0, rs2 = 0, imm = 0)
+  // Raw word with an undefined opcode (custom-0 = 0x0b); rs1/rs2 fields can be filled in.
+  // Hits the all-zero Decoder default, so it goes Decode -> Fetch (NOP, 2 cycles).
+  // Also used as padding so the last fetch never runs past the end of imem.
+  def unknown(rs1: Int = 0, rs2: Int = 0): Instr = Raw((BigInt(rs2) << 20) | (BigInt(rs1) << 15) | BigInt(0x0b))
+  val pad: Instr = unknown()
 
   def words(prog: Seq[Instr]): Seq[UInt] = prog.map(i => encode(i).U(32.W))
   def sim(prog: Seq[Instr], init: Map[Int, BigInt] = regInit)(body: MultiCycleCPU => Unit): Unit =
     simulate(new MultiCycleCPU(words(prog), init))(body)
   def ir(prog: Seq[Instr], i: Int): UInt = encode(prog(i)).U(32.W)
 
-  // 명령어별 사이클 수 모델: R/I-type 4, load 5, store 4. 하드웨어 FSM과 따로 한 번 더 적어둔 기대값이다.
-  def mcCycles(prog: Seq[Instr]): Int = prog.map {
-    case _: L            => 5
-    case _: S            => 4
-    case _: R | _: I     => 4
-    case other           => sys.error(s"mcCycles: 아직 구현 전인 명령어 $other")
-  }.sum
+  // Independent CPI model, written separately from the FSM:
+  // R/I/LUI/AUIPC/JAL/JALR 4, load 5, store 4, branch 3, undefined opcode 2.
+  def cpi(i: Instr): Int = i match {
+    case _: L                                  => 5
+    case _: S                                  => 4
+    case _: B                                  => 3
+    case _: R | _: I | _: U | _: Jal | _: Jalr => 4
+    case _: Raw                                => 2
+  }
 
-  // Step 11에서 만든 Fetch/Decode 경로. ALU/메모리 명령어는 이제 Execute로 넘어가므로, 이 경로를
-  // 그대로 타는 건 "아직 구현 안 된" 명령어(branch/jump)뿐이다 — 2사이클 만에 다음 명령어로 넘어간다.
-  describe("MultiCycleCPU (Fetch/Decode 경로 — 미구현 명령어는 여기서 바로 Fetch로 돌아온다)") {
+  // Expected hardware cycles = CPI sum over the instruction trace the golden model actually executed
+  // (following branches/jumps). With control flow the executed count differs from the program
+  // length, so the caller passes it as `instrs`.
+  def runMC(prog: Seq[Instr], instrs: Int = -1): Unit = {
+    val n = if (instrs < 0) prog.length else instrs
+    runMultiCycle(prog, hwCycles = executedInstrs(prog, n).map(cpi).sum, instrs = n)
+  }
+
+  // Fetch/Decode path from Step 11. Every RV32I instruction now continues to Execute,
+  // so only an undefined opcode stays on this path (2 cycles, NOP).
+  describe("MultiCycleCPU (Fetch/Decode 경로 — 정의되지 않은 opcode는 여기서 바로 Fetch로 돌아온다)") {
     val skel: Seq[Instr] = Seq(
-      B("beq", rs1 = 1, rs2 = 2, imm = 8),  // A=x1, B=x2
-      B("bne", rs1 = 4, rs2 = 5, imm = 8),  // A=x4, B=x5
-      Jalr(rd = 1, rs1 = 0, imm = 6),       // inst[24:20]=6은 rs2가 아니라 immediate 비트
+      unknown(rs1 = 1, rs2 = 2),                // A=x1, B=x2
+      unknown(rs1 = 4, rs2 = 5),                // A=x4, B=x5
+      Raw((BigInt(6) << 20) | BigInt(0x0b)),    // inst[24:20]=6: immediate bits in an I-type, not rs2
       pad,
     )
 
@@ -51,14 +63,14 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         dut.io.state.expect(State.decode)
         dut.io.ir.expect(ir(skel, 0))
         dut.io.pc.expect(4.U)
-        dut.io.a.expect(0.U) // fetch는 A/B를 안 건드린다
+        dut.io.a.expect(0.U) // Fetch leaves A/B alone
         dut.io.b.expect(0.U)
       }
     }
     it("decode 한 사이클: rs1/rs2가 가리키는 레지스터 값을 A/B에 래치하고 IR/PC는 그대로") {
       sim(skel) { dut =>
         dut.clock.step(2)
-        dut.io.state.expect(State.fetch) // 미구현 명령어 -> Execute 없이 바로 Fetch
+        dut.io.state.expect(State.fetch) // undefined opcode: straight back to Fetch, no Execute
         dut.io.ir.expect(ir(skel, 0))
         dut.io.pc.expect(4.U)
         dut.io.a.expect(7.U)
@@ -71,7 +83,7 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         dut.io.state.expect(State.decode)
         dut.io.ir.expect(ir(skel, 1))
         dut.io.pc.expect(8.U)
-        dut.io.a.expect(7.U) // 아직 첫 명령어의 A/B
+        dut.io.a.expect(7.U) // still the first instruction's A/B
         dut.io.b.expect(5.U)
         dut.clock.step(1)
         dut.io.state.expect(State.fetch)
@@ -79,15 +91,15 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         dut.io.b.expect(30.U)
       }
     }
-    it("I-type의 rs2 자리는 immediate 비트인데도 decode는 무조건 읽어 B에 넣는다(garbage read)") {
+    it("decode는 opcode를 안 보고 inst[24:20]을 rs2로 무조건 읽어 B에 넣는다(I-type이면 immediate 비트인 garbage read)") {
       sim(skel) { dut =>
         dut.clock.step(6)
         dut.io.ir.expect(ir(skel, 2))
         dut.io.a.expect(0.U)  // rs1 = x0
-        dut.io.b.expect(77.U) // inst[24:20] = 6 -> x6의 값
+        dut.io.b.expect(77.U) // inst[24:20] = 6 -> value of x6
       }
     }
-    it("미구현 명령어는 레지스터 파일을 안 바꾼다(NOP처럼 건너뜀)") {
+    it("정의되지 않은 opcode는 레지스터 파일을 안 바꾼다(NOP처럼 건너뜀)") {
       sim(skel) { dut =>
         dut.clock.step(8)
         dut.io.pc.expect(16.U)
@@ -106,7 +118,7 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         dut.io.state.expect(State.execute)
         dut.io.a.expect(7.U)
         dut.io.b.expect(5.U)
-        dut.io.aluOut.expect(0.U) // 아직 계산 전
+        // aluOut holds Decode's speculative branch/JAL target (oldPC + imm): meaningless for add, not checked
         dut.clock.step(1) // Execute
         dut.io.state.expect(State.writeback)
         dut.io.aluOut.expect(12.U)
@@ -137,9 +149,9 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         dut.io.debugRegs(5).expect(30.U)
       }
     }
-    it("미구현 명령어(jal)는 2사이클 만에 지나가고, 이어지는 ALU 명령어는 정상 실행된다") {
+    it("정의되지 않은 opcode는 2사이클 만에 지나가고, 이어지는 ALU 명령어는 정상 실행된다") {
       val prog: Seq[Instr] = Seq(
-        Jal(rd = 3, imm = 8),
+        unknown(),
         R("add", rd = 4, rs1 = 1, rs2 = 2),
         pad,
       )
@@ -147,7 +159,7 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         dut.clock.step(2)
         dut.io.state.expect(State.fetch)
         dut.io.pc.expect(4.U)
-        dut.io.debugRegs(3).expect(0.U) // jal은 아무것도 안 함
+        dut.io.debugRegs(3).expect(0.U) // 아무것도 안 함
         dut.clock.step(4)
         dut.io.state.expect(State.fetch)
         dut.io.pc.expect(8.U)
@@ -155,16 +167,16 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         dut.io.debugRegs(3).expect(0.U)
       }
     }
-    it("FSM 상태 전이: ALU 명령어는 4사이클, 미구현 명령어는 2사이클") {
+    it("FSM 상태 전이: ALU 명령어는 4사이클, 정의되지 않은 opcode는 2사이클") {
       val prog: Seq[Instr] = Seq(
         R("add", rd = 3, rs1 = 1, rs2 = 2), // 4사이클
-        Jal(rd = 5, imm = 8),               // 2사이클(건너뜀)
+        unknown(),                          // 2사이클(건너뜀)
         R("sub", rd = 6, rs1 = 4, rs2 = 5), // 4사이클
         pad,
       )
       val (f, d, e, w) = (State.fetch, State.decode, State.execute, State.writeback)
       val trace = Seq(f, d, e, w, // t=0..3   add
-                      f, d,       // t=4,5    jal: decode에서 바로 fetch
+                      f, d,       // t=4,5    정의되지 않은 opcode: decode에서 바로 fetch
                       f, d, e, w, // t=6..9   sub
                       f)          // t=10
       sim(prog) { dut =>
@@ -246,11 +258,11 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         L("lw", rd = 8, rs1 = 3, imm = 0),   // mem[64]는 여전히 17이어야 함
         L("lw", rd = 9, rs1 = 1, imm = 0),   // mem[16] = 1234
       )
-      runMultiCycle(prog, hwCycles = mcCycles(prog))
+      runMC(prog)
     }
   }
 
-  // Step 12부터 golden model(RV32IReference) 대조를 시작했다. 하드웨어 사이클 수는 mcCycles(명령어 종류별 합)로 센다.
+  // Golden-model comparison (RV32IReference) since Step 12; expected hardware cycles = CPI sum.
   describe("MultiCycleCPU vs golden model (R/I-type)") {
     it("R-type 10개 연산을 전부 지난다") {
       val prog: Seq[Instr] = Seq(
@@ -267,7 +279,7 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         R("slt", rd = 11, rs1 = 1, rs2 = 2),
         R("sltu", rd = 12, rs1 = 1, rs2 = 2),
       )
-      runMultiCycle(prog, hwCycles = mcCycles(prog))
+      runMC(prog)
     }
     it("I-type 9개 연산(음수 immediate, 시프트 포함)을 전부 지난다") {
       val prog: Seq[Instr] = Seq(
@@ -282,7 +294,7 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         I("addi", rd = 9, rs1 = 0, imm = -1),
         I("srai", rd = 10, rs1 = 9, imm = 4),
       )
-      runMultiCycle(prog, hwCycles = mcCycles(prog))
+      runMC(prog)
     }
     it("앞 명령어의 결과를 바로 다음 명령어가 읽어도 맞다(명령어가 끝까지 끝난 뒤 다음 Fetch)") {
       val prog: Seq[Instr] = Seq(
@@ -292,7 +304,7 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         R("add", rd = 1, rs1 = 1, rs2 = 1), // x1 = 8
         R("add", rd = 2, rs1 = 1, rs2 = 1), // x2 = 16
       )
-      runMultiCycle(prog, hwCycles = mcCycles(prog))
+      runMC(prog)
     }
     it("rd=x0으로 쓰려는 시도는 무시되고 x0은 0으로 남는다") {
       val prog: Seq[Instr] = Seq(
@@ -301,7 +313,7 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         R("add", rd = 0, rs1 = 1, rs2 = 1),
         R("add", rd = 2, rs1 = 0, rs2 = 1), // x0(=0) + x1
       )
-      runMultiCycle(prog, hwCycles = mcCycles(prog))
+      runMC(prog)
     }
   }
 
@@ -313,7 +325,7 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         S("sw", rs1 = 1, rs2 = 2, imm = 0),
         L("lw", rd = 3, rs1 = 1, imm = 0),
       )
-      runMultiCycle(prog, hwCycles = mcCycles(prog))
+      runMC(prog)
     }
     it("sb/lb, lbu: 부호 있는 바이트를 저장/로드하며 부호·무부호 확장이 갈린다") {
       val prog: Seq[Instr] = Seq(
@@ -323,7 +335,7 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         L("lb", rd = 3, rs1 = 1, imm = 0),
         L("lbu", rd = 4, rs1 = 1, imm = 0),
       )
-      runMultiCycle(prog, hwCycles = mcCycles(prog))
+      runMC(prog)
     }
     it("sh/lh는 word 안 상위 하프에도 정확히 배치된다 (offset != 0, Mem은 비초기화라 먼저 0으로 찍어둠)") {
       val prog: Seq[Instr] = Seq(
@@ -335,7 +347,7 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         L("lhu", rd = 5, rs1 = 1, imm = 2),
         L("lw", rd = 4, rs1 = 1, imm = 0),
       )
-      runMultiCycle(prog, hwCycles = mcCycles(prog))
+      runMC(prog)
     }
     it("byte store가 인접 바이트를 안 건드린다 (byte-enable)") {
       val prog: Seq[Instr] = Seq(
@@ -346,7 +358,7 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         S("sb", rs1 = 1, rs2 = 3, imm = 1),
         L("lw", rd = 4, rs1 = 1, imm = 0),
       )
-      runMultiCycle(prog, hwCycles = mcCycles(prog))
+      runMC(prog)
     }
     it("store 3개 + load 3개 + add로 배열 합 60을 만든다") {
       val prog: Seq[Instr] = Seq(
@@ -363,7 +375,206 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
         R("add", rd = 8, rs1 = 5, rs2 = 6),
         R("add", rd = 8, rs1 = 8, rs2 = 7), // x8 = 60
       )
-      runMultiCycle(prog, hwCycles = mcCycles(prog)) // 4x4 + 3x4 + 3x5 + 2x4 = 51
+      runMC(prog) // 4x4 + 3x4 + 3x5 + 2x4 = 51
+    }
+  }
+
+  // Step 14: branch/JAL/JALR/LUI/AUIPC. Branch decision in Execute, target precomputed in Decode as oldPC + imm.
+  describe("MultiCycleCPU (Branch/Jump/LUI/AUIPC 타임라인)") {
+    it("Fetch가 oldPC를 잡는다: 두 번째 명령어(pc=4)의 fetch 뒤엔 pc=8, oldPc=4") {
+      val prog: Seq[Instr] = Seq(I("addi", rd = 3, rs1 = 0, imm = 1), I("addi", rd = 4, rs1 = 0, imm = 1), pad)
+      sim(prog) { dut =>
+        dut.clock.step(1)
+        dut.io.pc.expect(4.U)
+        dut.io.oldPc.expect(0.U)
+        dut.clock.step(4) // rest of the first instruction (3 cycles) + second Fetch
+        dut.io.state.expect(State.decode)
+        dut.io.pc.expect(8.U)
+        dut.io.oldPc.expect(4.U)
+      }
+    }
+    it("taken beq: Decode에서 aluOut에 타깃(oldPC+imm)을 잡고, 3사이클 만에 pc가 타깃으로 바뀐다") {
+      val prog: Seq[Instr] = Seq(
+        B("beq", rs1 = 1, rs2 = 1, imm = 12),   // pc 0 -> 12
+        I("addi", rd = 3, rs1 = 0, imm = 1),   // skipped
+        I("addi", rd = 3, rs1 = 0, imm = 2),   // skipped
+        I("addi", rd = 7, rs1 = 0, imm = 9),   // target
+        pad,
+      )
+      sim(prog) { dut =>
+        dut.clock.step(2) // fetch, decode
+        dut.io.state.expect(State.execute)
+        dut.io.pc.expect(4.U)
+        dut.io.aluOut.expect(12.U) // precomputed target
+        dut.clock.step(1)
+        dut.io.state.expect(State.fetch) // no Writeback
+        dut.io.pc.expect(12.U)
+        dut.io.aluOut.expect(12.U)   // Execute must not overwrite aluOut
+        dut.clock.step(4)
+        dut.io.debugRegs(7).expect(9.U)
+        dut.io.debugRegs(3).expect(0.U)
+      }
+    }
+    it("not-taken beq: pc는 fetch에서 이미 +4 된 값 그대로, 레지스터는 안 바뀐다") {
+      val prog: Seq[Instr] = Seq(
+        B("beq", rs1 = 1, rs2 = 2, imm = 12),
+        I("addi", rd = 3, rs1 = 0, imm = 1),
+        pad,
+      )
+      sim(prog) { dut =>
+        dut.clock.step(3)
+        dut.io.state.expect(State.fetch)
+        dut.io.pc.expect(4.U)
+        dut.clock.step(4)
+        dut.io.debugRegs(3).expect(1.U)
+      }
+    }
+    it("jal: 타깃은 pc, 복귀주소(oldPC+4)는 aluOut으로 같은 엣지에 들어가고 Writeback이 rd에 쓴다") {
+      val prog: Seq[Instr] = Seq(
+        Jal(rd = 3, imm = 12),
+        I("addi", rd = 9, rs1 = 0, imm = 1), // skipped
+        I("addi", rd = 9, rs1 = 0, imm = 2), // skipped
+        pad,
+      )
+      sim(prog) { dut =>
+        dut.clock.step(2)
+        dut.io.aluOut.expect(12.U) // precomputed target
+        dut.clock.step(1)
+        dut.io.state.expect(State.writeback)
+        dut.io.pc.expect(12.U)
+        dut.io.aluOut.expect(4.U) // link address
+        dut.io.debugRegs(3).expect(0.U)
+        dut.clock.step(1)
+        dut.io.state.expect(State.fetch)
+        dut.io.debugRegs(3).expect(4.U)
+        dut.io.debugRegs(9).expect(0.U)
+      }
+    }
+    it("jalr: 타깃은 (rs1+imm)의 LSB를 0으로 만든 값, rd에는 복귀주소") {
+      val prog: Seq[Instr] = Seq(Jalr(rd = 3, rs1 = 4, imm = 9), pad) // x4=100 -> 109 -> 108
+      sim(prog) { dut =>
+        dut.clock.step(3)
+        dut.io.state.expect(State.writeback)
+        dut.io.pc.expect(108.U)
+        dut.io.aluOut.expect(4.U)
+        dut.clock.step(1)
+        dut.io.debugRegs(3).expect(4.U)
+      }
+    }
+    it("lui: ALU A 입력이 0 -> rd = imm20 << 12, 4사이클") {
+      val prog: Seq[Instr] = Seq(U("lui", rd = 3, imm20 = 0x12345), pad)
+      sim(prog) { dut =>
+        dut.clock.step(3)
+        dut.io.aluOut.expect(0x12345000L.U)
+        dut.io.debugRegs(3).expect(0.U)
+        dut.clock.step(1)
+        dut.io.debugRegs(3).expect(0x12345000L.U)
+        dut.io.state.expect(State.fetch)
+      }
+    }
+    it("auipc: ALU A 입력이 oldPC — 자기 PC(8) + imm20<<12 (pc는 이미 12)") {
+      val prog: Seq[Instr] = Seq(
+        I("addi", rd = 3, rs1 = 0, imm = 1),
+        I("addi", rd = 3, rs1 = 0, imm = 2),
+        U("auipc", rd = 8, imm20 = 1),
+        pad,
+      )
+      sim(prog) { dut =>
+        dut.clock.step(8 + 1)
+        dut.io.pc.expect(12.U)
+        dut.io.oldPc.expect(8.U)
+        dut.clock.step(3)
+        dut.io.debugRegs(8).expect((8 + 0x1000).U)
+      }
+    }
+  }
+
+  describe("MultiCycleCPU vs golden model (Branch/Jump/LUI/AUIPC)") {
+    it("6가지 분기를 taken/not-taken 모두 지난다 (blt/bge는 부호, bltu/bgeu는 무부호)") {
+      val prog: Seq[Instr] = Seq(
+        I("addi", rd = 1, rs1 = 0, imm = -5),
+        I("addi", rd = 2, rs1 = 0, imm = 3),
+        B("blt", rs1 = 1, rs2 = 2, imm = 8),   // taken
+        I("addi", rd = 10, rs1 = 0, imm = 1),
+        B("bge", rs1 = 1, rs2 = 2, imm = 8),   // not taken
+        I("addi", rd = 11, rs1 = 0, imm = 1),
+        B("bltu", rs1 = 1, rs2 = 2, imm = 8),  // not taken (-5 is huge unsigned)
+        I("addi", rd = 12, rs1 = 0, imm = 1),
+        B("bgeu", rs1 = 1, rs2 = 2, imm = 8),  // taken
+        I("addi", rd = 13, rs1 = 0, imm = 1),
+        B("beq", rs1 = 1, rs2 = 2, imm = 8),   // not taken
+        I("addi", rd = 14, rs1 = 0, imm = 1),
+        B("bne", rs1 = 1, rs2 = 2, imm = 8),   // taken
+        I("addi", rd = 15, rs1 = 0, imm = 1),
+        pad,
+      )
+      runMC(prog, instrs = 11)
+    }
+    it("음수 offset 루프: 1+2+3+4+5 = 15 (bne로 뒤로 분기)") {
+      val prog: Seq[Instr] = Seq(
+        I("addi", rd = 1, rs1 = 0, imm = 0),
+        I("addi", rd = 2, rs1 = 0, imm = 5),
+        R("add", rd = 1, rs1 = 1, rs2 = 2),
+        I("addi", rd = 2, rs1 = 2, imm = -1),
+        B("bne", rs1 = 2, rs2 = 0, imm = -8),
+        pad,
+      )
+      runMC(prog, instrs = 2 + 5 * 3)
+    }
+    it("jal/jalr로 함수 호출과 복귀: 호출 뒤 복귀 지점에서 이어 실행한다") {
+      val prog: Seq[Instr] = Seq(
+        I("addi", rd = 10, rs1 = 0, imm = 3),
+        Jal(rd = 1, imm = 16),                // -> 20 (function), x1 = 8
+        I("addi", rd = 11, rs1 = 10, imm = 1), // return point
+        Jal(rd = 0, imm = 16),                // -> 28 (end)
+        pad,
+        I("slli", rd = 10, rs1 = 10, imm = 2), // function body (pc 20)
+        Jalr(rd = 0, rs1 = 1, imm = 0),        // ret
+        pad,
+      )
+      runMC(prog, instrs = 6)
+    }
+    it("jalr rd==rs1 (jalr x1,x1,0): 옛 x1로 점프하고 x1엔 복귀주소") {
+      val prog: Seq[Instr] = Seq(
+        I("addi", rd = 1, rs1 = 0, imm = 12),
+        Jalr(rd = 1, rs1 = 1, imm = 0),
+        pad,
+        I("addi", rd = 2, rs1 = 1, imm = 0),
+      )
+      runMC(prog, instrs = 3)
+    }
+    it("jalr는 타깃의 LSB를 0으로 만든다 (13 -> 12)") {
+      val prog: Seq[Instr] = Seq(
+        I("addi", rd = 1, rs1 = 0, imm = 13),
+        Jalr(rd = 2, rs1 = 1, imm = 0),
+        pad,
+        I("addi", rd = 3, rs1 = 0, imm = 1),
+      )
+      runMC(prog, instrs = 3)
+    }
+    it("lui + addi로 32비트 상수를 만든다 (0x12345678), auipc 두 개, 음수 방향 lui") {
+      val prog: Seq[Instr] = Seq(
+        U("lui", rd = 1, imm20 = 0x12345),
+        I("addi", rd = 1, rs1 = 1, imm = 0x678),
+        U("auipc", rd = 2, imm20 = 0),
+        U("auipc", rd = 3, imm20 = 1),
+        U("lui", rd = 4, imm20 = 0xFFFFF),
+        pad,
+      )
+      runMC(prog, instrs = 5)
+    }
+    it("루프 안에 load/store가 섞여도 맞다 (메모리 카운트다운)") {
+      val prog: Seq[Instr] = Seq(
+        I("addi", rd = 1, rs1 = 0, imm = 64),
+        I("addi", rd = 2, rs1 = 0, imm = 4),
+        S("sw", rs1 = 1, rs2 = 2, imm = 0),
+        L("lw", rd = 3, rs1 = 1, imm = 0),      // loop start (pc 12)
+        I("addi", rd = 3, rs1 = 3, imm = -1),
+        S("sw", rs1 = 1, rs2 = 3, imm = 0),
+        B("bne", rs1 = 3, rs2 = 0, imm = -12),
+        pad,
+      )
+      runMC(prog, instrs = 3 + 4 * 4)
     }
   }
 }

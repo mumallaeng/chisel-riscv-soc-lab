@@ -18,6 +18,9 @@ object RV32IReference {
   case class U(op: String, rd: Int, imm20: Int) extends Instr         // lui/auipc, imm20 = inst[31:12] (실제 값은 imm20<<12)
   case class Jal(rd: Int, imm: Int) extends Instr                     // pc 기준 byte offset(짝수)
   case class Jalr(rd: Int, rs1: Int, imm: Int) extends Instr          // target = (rs1+imm) & ~1
+  // Raw 32-bit word with an undefined opcode. Treated as a NOP, same policy as the Decoder default
+  // (a real CPU would raise an illegal-instruction trap; this project has no traps yet).
+  case class Raw(word: BigInt) extends Instr
 
   def rFields(op: String): (Int, Int) = op match { // (funct7, funct3)
     case "add"  => (0x00, 0)
@@ -97,12 +100,19 @@ object RV32IReference {
     case Jalr(rd, rs1, imm) =>
       val imm12 = imm & 0xfff
       (BigInt(imm12) << 20) | (BigInt(rs1) << 15) | (BigInt(rd) << 7) | BigInt(0x67) // funct3=000
+    case Raw(word) => word
   }
 
   // cycles만큼, pc를 따라가며 한 사이클에 한 명령을 실행한다(분기/점프로 순서가 바뀔 수 있어
   // prog를 순서대로 foreach 못 돌고, 하드웨어처럼 주소로 다음 명령을 찾아야 한다).
-  def interpret(prog: Seq[Instr], cycles: Int): Array[Int] = {
+  def interpret(prog: Seq[Instr], cycles: Int): Array[Int] = interpretTrace(prog, cycles)._1
+
+  // Like interpret, but also returns the executed instructions in order. With branches/jumps the
+  // executed sequence differs from program order/length, so multi-cycle expected cycles (CPI sum)
+  // are computed from this trace.
+  def interpretTrace(prog: Seq[Instr], cycles: Int): (Array[Int], Seq[Instr]) = {
     val regs   = Array.fill(32)(0)
+    val executed = scala.collection.mutable.ArrayBuffer[Instr]()
     val mem    = Array.fill(1024)(0.toByte) // DataMemory 기본 크기(256 word)와 맞춘 byte 배열
     val byAddr = prog.zipWithIndex.map { case (instr, i) => (i * 4, instr) }.toMap
     def w(rd: Int, v: Int): Unit = if (rd != 0) regs(rd) = v
@@ -110,7 +120,9 @@ object RV32IReference {
     var pc = 0
     for (_ <- 0 until cycles) {
       var nextPc = pc + 4
-      byAddr(pc) match {
+      val instr  = byAddr(pc)
+      executed += instr
+      instr match {
         case R("add", rd, rs1, rs2)  => w(rd, regs(rs1) + regs(rs2))
         case R("sub", rd, rs1, rs2)  => w(rd, regs(rs1) - regs(rs2))
         case R("sll", rd, rs1, rs2)  => w(rd, regs(rs1) << (regs(rs2) & 0x1f))
@@ -163,11 +175,12 @@ object RV32IReference {
           w(rd, pc + 4); nextPc = pc + imm
         case Jalr(rd, rs1, imm) =>
           w(rd, pc + 4); nextPc = (regs(rs1) + imm) & ~1
+        case Raw(_) => () // undefined opcode: NOP
         case other => sys.error(s"golden model: unsupported instr $other")
       }
       pc = nextPc
     }
-    regs
+    (regs, executed.toSeq)
   }
 }
 
@@ -198,9 +211,12 @@ trait RV32ITestHarness { self: ChiselSim =>
     }
   }
 
-  // multi-cycle CPU용. golden model은 "명령어 instrs개를 실행한 뒤"의 레지스터를, 하드웨어는
-  // hwCycles 사이클 뒤의 레지스터를 본다 — 명령어당 사이클 수(CPI)가 명령어마다 달라서 둘은 다른 값이고,
-  // 호출하는 쪽이 hwCycles를 직접 세어 넘긴다(instrs를 생략하면 prog.length).
+  // Instructions the golden model actually executed (following branches/jumps); used to sum CPI.
+  def executedInstrs(prog: Seq[Instr], instrs: Int): Seq[Instr] = interpretTrace(prog, instrs)._2
+
+  // For the multi-cycle CPU. The golden model runs `instrs` instructions, the hardware runs `hwCycles`
+  // cycles; CPI differs per instruction so the two counts differ, and the caller supplies hwCycles
+  // (`instrs` defaults to prog.length).
   def runMultiCycle(prog: Seq[Instr], hwCycles: Int, instrs: Int = -1): Unit = {
     val n        = if (instrs < 0) prog.length else instrs
     val words    = prog.map(i => encode(i).U(32.W))
