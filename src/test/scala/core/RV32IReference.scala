@@ -192,15 +192,31 @@ trait RV32ITestHarness { self: ChiselSim =>
 
   def executedInstrs(prog: Seq[Instr], instrs: Int): Seq[Instr] = interpretTrace(prog, instrs)._2
 
-  def runMultiCycle(prog: Seq[Instr], hwCycles: Int, instrs: Int = -1): Unit = {
+  def cpi(i: Instr): Int = i match {
+    case _: L                                  => 5
+    case _: S                                  => 4
+    case _: B                                  => 3
+    case _: R | _: I | _: U | _: Jal | _: Jalr => 4
+    case _: Raw                                => 2
+  }
+
+  def runMultiCycle(prog: Seq[Instr], hwCycles: Int, instrs: Int = -1, expectPass: Boolean = false): Unit = {
     val n        = if (instrs < 0) prog.length else instrs
     val words    = prog.map(i => encode(i).U(32.W))
     val expected = interpret(prog, n)
+    if (expectPass) {
+      assert(expected(31) == 1, "golden model did not reach pass marker (x31=1)")
+    }
     simulate(new MultiCycleCPU(words)) { dut =>
       dut.clock.step(hwCycles)
       for (r <- 0 until 32) {
         dut.io.debugRegs(r).expect(expected(r).S(32.W).asUInt)
       }
     }
+  }
+
+  def runMC(prog: Seq[Instr], instrs: Int = -1, expectPass: Boolean = false): Unit = {
+    val n = if (instrs < 0) prog.length else instrs
+    runMultiCycle(prog, hwCycles = executedInstrs(prog, n).map(cpi).sum, instrs = n, expectPass = expectPass)
   }
 }

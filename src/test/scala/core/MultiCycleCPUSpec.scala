@@ -15,19 +15,6 @@ class MultiCycleCPUSpec extends AnyFunSpec with ChiselSim with RV32ITestHarness 
     simulate(new MultiCycleCPU(words(prog), init))(body)
   def ir(prog: Seq[Instr], i: Int): UInt = encode(prog(i)).U(32.W)
 
-  def cpi(i: Instr): Int = i match {
-    case _: L                                  => 5
-    case _: S                                  => 4
-    case _: B                                  => 3
-    case _: R | _: I | _: U | _: Jal | _: Jalr => 4
-    case _: Raw                                => 2
-  }
-
-  def runMC(prog: Seq[Instr], instrs: Int = -1): Unit = {
-    val n = if (instrs < 0) prog.length else instrs
-    runMultiCycle(prog, hwCycles = executedInstrs(prog, n).map(cpi).sum, instrs = n)
-  }
-
   describe("MultiCycleCPU (Fetch/Decode 경로 — 정의되지 않은 opcode는 여기서 바로 Fetch로 돌아온다)") {
     val skel: Seq[Instr] = Seq(
       unknown(rs1 = 1, rs2 = 2),
